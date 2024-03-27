@@ -308,7 +308,16 @@ class DaysModal(Modal):
         
         # Update the registry with the new value
         await self.update_speedup_registry(interaction.user.id, days)
-        
+
+        # Prepare an embed message
+        embed = Embed(description=f"{interaction.user.mention} registered {days} days of {self.speedup_type} speedups!", color=0x00ff00)  # Green color
+
+        # Send the embed message to the specific channel
+        channel_id = 1222599205265080320
+        channel = interaction.client.get_channel(channel_id)
+        if channel:
+            await channel.send(embed=embed)
+
         # Send a confirmation message
         await interaction.response.send_message(f"You have registered {days} days for {self.speedup_type}.", ephemeral=True)
 
@@ -459,7 +468,7 @@ async def changename(ctx):
     modal = NameChangeModal(title="Change Your Name By Filling Out Below")
     await ctx.response.send_modal(modal)
 
-@bot.slash_command(guild_ids=[ALLIANCE_ID], name="register", description="Register your progress")
+@bot.slash_command(guild_ids=[ALLIANCE_ID], name="register", description="Register your days of speedups")
 async def register(ctx):
     # Create a view to hold the select menu
     view = RegisterSelectView()
