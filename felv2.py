@@ -8,9 +8,9 @@ logger = logging.getLogger(__name__)
 import logging
 import discord
 from discord.ext import commands
-from discord.ui import Button, Modal, View, InputText
-from discord.commands import Option
-from discord import Embed
+from discord.ui import Button, Modal, View, InputText, Select
+#from discord.commands import Option
+from discord import Embed, Member, Option
 
 from dotenv import load_dotenv
 
@@ -56,6 +56,52 @@ def save_associations():
         # Convert tuples in the list to lists for JSON serialization
         json.dump([list(pair) for pair in user_message_associations], f)
 
+class InitialChoicesView(discord.ui.View):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs, timeout=None)
+        self.add_item(InitialChoicesSelect())
+
+class UnlockView(discord.ui.View):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs, timeout=None)
+        self.add_item(UnlockButton())
+
+class RegisterSelectView(View):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs, timeout=None)
+        self.add_item(RegisterSelect())
+
+class SpeedupTypeView(View):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.add_item(SpeedupTypeSelect())
+
+class RegisterSelect(Select):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs, placeholder="Choose an option...", min_values=1, max_values=1)
+        self.add_option(label="Troops", description="Register your troops speedups")
+        self.add_option(label="Research", description="Register your research speedups")
+        self.add_option(label="Construction", description="Register your construction speedups")
+    
+    async def callback(self, interaction: discord.Interaction):
+        # Determine the speedup type based on the selected option
+        speedup_type = self.values[0].lower()
+        
+        # Open a modal when an option is selected, passing the speedup type
+        modal = DaysModal(speedup_type=speedup_type, title=f"Register {self.values[0]} Speedups")
+        await interaction.response.send_modal(modal)
+
+class SpeedupTypeSelect(Select):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs, placeholder="Choose an option...", min_values=1, max_values=1)
+        self.add_option(label="Troops", description="View troops speedups")
+        self.add_option(label="Research", description="View research speedups")
+        self.add_option(label="Construction", description="View construction speedups")
+    
+    async def callback(self, interaction: discord.Interaction):
+        # Display the registration details based on the selected type
+        await display_registration_details(interaction, self.values[0])
+
 class InitialChoicesSelect(discord.ui.Select):
     def __init__(self, *args, **kwargs):
         options = [
@@ -86,16 +132,6 @@ class InitialChoicesSelect(discord.ui.Select):
             # For other choices, ask for more details via a modal
             modal = FollowUpModal(initial_choice=choice)
             await interaction.response.send_modal(modal)
-
-class InitialChoicesView(discord.ui.View):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs, timeout=None)
-        self.add_item(InitialChoicesSelect())
-
-class UnlockView(discord.ui.View):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs, timeout=None)
-        self.add_item(UnlockButton())
 
 class FollowUpModal(Modal):
     def __init__(self, initial_choice, *args, **kwargs):
@@ -137,7 +173,7 @@ class FollowUpModal(Modal):
 
             if self.initial_choice not in ["FEL", "FEL Academy"]:
                 role_name_prefix = f"{state}-" if state else ""
-                role_name = f"diplo-{role_name_prefix}{alliance}".strip()
+                role_name = f"diplo-{role_name_prefix}{alliance.lower()}".strip()
 
                 role = discord.utils.find(lambda r: r.name == role_name, guild.roles)
                 if not role and alliance:  # Ensure there's an alliance or state specified
@@ -148,7 +184,7 @@ class FollowUpModal(Modal):
                     await member.add_roles(role)
                     logger.info(f"Role '{role_name}' has been added to {member.display_name}.")
                 
-                channel_name = role_name  # The channel name will be the same as the role name
+                channel_name = role_name.lower()  # The channel name will be the same as the role name
                 category_id = 1158968530704793640
                 category = guild.get_channel(category_id)
 
@@ -168,7 +204,7 @@ class FollowUpModal(Modal):
                     channel_created = True
 
                 # Construct a welcome message
-                welcome_embed = Embed(color=Colour.blue())  # Set embed color to blue
+                welcome_embed = Embed(color=discord.Colour.blue())  # Set embed color to blue
 
                 if channel_created:
                     # If the channel was just created, send a special welcome message
@@ -259,6 +295,39 @@ class NameChangeModal(Modal):
         except Exception as e:
             logger.error(f"Error in NameChangeModal callback: {e}", exc_info=True)
             await interaction.response.send_message("An error occurred processing your request.", ephemeral=True)
+
+class DaysModal(Modal):
+    def __init__(self, speedup_type, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.speedup_type = speedup_type
+        self.add_item(InputText(label="Number of Days", placeholder="Enter the number of days...", custom_id="days_input"))
+    
+    async def callback(self, interaction):
+        # Extract the number of days from the modal's input text
+        days = self.children[0].value
+        
+        # Update the registry with the new value
+        await self.update_speedup_registry(interaction.user.id, days)
+        
+        # Send a confirmation message
+        await interaction.response.send_message(f"You have registered {days} days for {self.speedup_type}.", ephemeral=True)
+
+    async def update_speedup_registry(self, member_id, days):
+        # Define the filename based on the speedup type
+        filename = f"register-{self.speedup_type}.json"
+        # Check if the file exists, and load it; if not, initialize an empty dictionary
+        if os.path.exists(filename):
+            with open(filename, "r") as file:
+                registry = json.load(file)
+        else:
+            registry = {}
+
+        # Update the registry with the new days value for the member
+        registry[str(member_id)] = days
+
+        # Write the updated registry back to the file
+        with open(filename, "w") as file:
+            json.dump(registry, file)
 
 class UnlockButton(discord.ui.Button):
     def __init__(self, *args, **kwargs):
@@ -389,5 +458,79 @@ async def resetaccess(ctx: discord.ApplicationContext, member: discord.Member):
 async def changename(ctx):
     modal = NameChangeModal(title="Change Your Name By Filling Out Below")
     await ctx.response.send_modal(modal)
+
+@bot.slash_command(guild_ids=[ALLIANCE_ID], name="register", description="Register your progress")
+async def register(ctx):
+    # Create a view to hold the select menu
+    view = RegisterSelectView()
+    await ctx.respond("Please select an option:", view=view, ephemeral=True)
+
+@bot.slash_command(guild_ids=[ALLIANCE_ID], name="registration", description="View speedup registration details")
+async def registration(ctx, member: Option(Member, required=False, description="Select a member")):
+    # If a member is specified, show their details directly
+    if member:
+        await show_member_speedups(ctx, member)
+    else:
+        # Otherwise, present a select menu to choose the speedup type
+        view = SpeedupTypeView()
+        await ctx.respond("Select the type of speedups to view:", view=view, ephemeral=False)
+
+async def display_registration_details(interaction, speedup_type):
+    filename = f"register-{speedup_type.lower()}.json"
+    guild = interaction.guild  # The guild (server) from the interaction
+    
+    try:
+        with open(filename, "r") as file:
+            registry = json.load(file)
+    except FileNotFoundError:
+        await interaction.response.send_message(f"No registrations found for {speedup_type}.", ephemeral=False)
+        return
+    
+    member_info_list = []
+    for member_id, days in registry.items():
+        member = guild.get_member(int(member_id))  # Fetch the member object from the ID
+        if member:
+            # If member is found, use their display name
+            member_name = member.display_name
+        else:
+            # If member not found (e.g., left the server), use a placeholder
+            member_name = f"Member ID {member_id} (not found)"
+        member_info_list.append((member_name, days))
+    
+    # Sort the list by days (descending) and take top 35
+    sorted_member_info_list = sorted(member_info_list, key=lambda x: int(x[1]), reverse=True)[:35]
+    formatted_list = "\n".join([f"{idx + 1}. {member_name}: {days} days" for idx, (member_name, days) in enumerate(sorted_member_info_list)])
+    
+    if formatted_list:
+        await interaction.response.send_message(f"```{formatted_list}```", ephemeral=False)
+    else:
+        await interaction.followup.send("No registrations found.", ephemeral=False)
+
+async def show_member_speedups(ctx, member):
+    speedup_types = ["troops", "research", "construction"]
+    member_speedups = {}
+
+    # Iterate through each type of speedup and try to find the member's data
+    for speedup_type in speedup_types:
+        filename = f"register-{speedup_type}.json"
+        try:
+            with open(filename, "r") as file:
+                registry = json.load(file)
+                # If the member's ID is in the registry, add it to the member_speedups dictionary
+                if str(member.id) in registry:
+                    member_speedups[speedup_type] = registry[str(member.id)]
+        except FileNotFoundError:
+            # If the file doesn't exist, just skip it
+            continue
+
+    if member_speedups:
+        # Construct the message if there are speedups registered for the member
+        message_parts = [f"{speedup_type.capitalize()}: {days} days" for speedup_type, days in member_speedups.items()]
+        message = f"Member {member.display_name} has:\n" + "\n".join(message_parts)
+    else:
+        # Default message if no speedups are found for the member
+        message = f"Member {member.display_name} has no registered speedups."
+
+    await ctx.respond(message, ephemeral=False)
 
 bot.run(os.getenv("BOT_TOKEN"))
