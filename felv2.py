@@ -1,5 +1,8 @@
-import logging, os
-import json
+import logging, os, io, json, numpy as np
+import matplotlib.pyplot as plt
+from datetime import datetime
+import boto3
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -11,8 +14,16 @@ from discord.ext import commands
 from discord.ui import Button, Modal, View, InputText, Select
 #from discord.commands import Option
 from discord import Embed, Member, Option
+from uuid import uuid4
 
 from dotenv import load_dotenv
+
+s3 = boto3.client('s3')
+bucket_name = 'scheduling-bucket-felserver'
+
+# Assuming the boto3 DynamoDB resource is already set up
+dynamodb = boto3.resource('dynamodb', region_name='us-east-2')
+table = dynamodb.Table('felserver')
 
 class PersistentViewBot(commands.Bot):
     def __init__(self):
@@ -22,6 +33,11 @@ class PersistentViewBot(commands.Bot):
         self.persistent_views_added = False
 
     async def on_ready(self):
+        if not hasattr(self, '_synced'):
+            # Ensure commands are synced on the first ready event
+            await self.sync_commands()  # Synchronize slash commands with Discord
+            self._synced = True
+        
         global user_message_associations
         try:
             with open('user_message_associations.json', 'r') as f:
@@ -35,7 +51,10 @@ class PersistentViewBot(commands.Bot):
             self.add_view(UnlockView())
 
             self.persistent_views_added = True
-            print(f'Logged in as {bot.user} with an ID of {bot.user.id}')
+
+        await self.change_presence(activity=discord.Activity(type=discord.ActivityType.competing, name="an Epic SvS Battle"))
+
+        print(f'Logged in as {bot.user} with an ID of {bot.user.id}')
             
 bot = PersistentViewBot()
 bot.remove_command('help')
@@ -541,5 +560,202 @@ async def show_member_speedups(ctx, member):
         message = f"Member {member.display_name} has no registered speedups."
 
     await ctx.respond(message, ephemeral=False)
+
+def load_files_from_s3(subfolder):
+    files = []
+    response = s3.list_objects_v2(Bucket=bucket_name, Prefix=subfolder)
+    for item in response.get('Contents', []):
+        key = item['Key']
+        # Check that the object is not a directory by ensuring it doesn't end with '/'
+        if not key.endswith('/'):
+            file_content = s3.get_object(Bucket=bucket_name, Key=key)
+            file_data = file_content['Body'].read().decode('utf-8')
+            
+            try:
+                json_data = json.loads(file_data)
+                files.append(json_data)
+            except json.JSONDecodeError as e:
+                logging.error(f"Failed to decode JSON from {key}: {e}")
+                # Optionally, continue to the next item or handle the error as needed
+    return files
+
+def load_schedules():
+    return load_files_from_s3('schedules/')
+
+def load_absences():
+    return load_files_from_s3('absences/')
+
+def extract_day_availability(schedules, day):
+    day_availability = {}
+    for schedule in schedules:
+        username = schedule['username']
+        times = schedule['schedule'][day]
+        day_availability[username] = times
+    return day_availability
+
+def adjust_availability_for_absences(day_availability, absences, date):
+    print(f"DEBUG DATE: {date}")
+    date_str = date.strftime('%m/%d')  # Format the date as MM/DD for comparison
+    logging.debug(f"Adjusting availabilities for date: {date_str}")
+
+    print(f"DEBUG DATE STR: {date_str}")
+
+    for absence in absences:
+        username = absence['username']
+        print(f"DEBUG ABSENCE ABS: {absence['absences']}")
+        if date_str in absence['absences']:
+            user_absences = absence['absences'][date_str]
+            logging.info(f"Processing absences for {username}: {user_absences}")
+
+            if username in day_availability:
+                new_periods = []
+                for scheduled_time in day_availability[username]:
+                    schedule_start = datetime.strptime(scheduled_time[0], '%H:%M')
+                    schedule_end = datetime.strptime(scheduled_time[1], '%H:%M')
+                    periods_to_add = [(schedule_start, schedule_end)]
+
+                    for absence_time in user_absences:
+                        absence_start = datetime.strptime(absence_time[0], '%H:%M')
+                        absence_end = datetime.strptime(absence_time[1], '%H:%M')
+                        updated_periods = []
+
+                        for start, end in periods_to_add:
+                            if start < absence_end and end > absence_start:
+                                if start < absence_start:
+                                    updated_periods.append((start, min(end, absence_start)))
+                                if end > absence_end:
+                                    updated_periods.append((max(start, absence_end), end))
+                            else:
+                                updated_periods.append((start, end))
+                        periods_to_add = updated_periods
+
+                    new_periods.extend([(start.strftime('%H:%M'), end.strftime('%H:%M')) for start, end in periods_to_add])
+                    logging.info(f"New periods for {username} after processing absence: {new_periods}")
+
+                day_availability[username] = new_periods
+                logging.info(f"Final availability for {username}: {day_availability[username]}")
+            else:
+                logging.info(f"No scheduled availability to adjust for {username}")
+        else:
+            logging.info(f"No absences recorded on {date_str} for {username}")
+
+def visualize_availability(day_availability):
+    # Define the total minutes in a day
+    total_minutes = 24 * 60
+    availability_counts = np.zeros(total_minutes)
+    
+    # Process each user's availability times and count overlaps
+    for periods in day_availability.values():
+        for period in periods:
+            start_hour, start_minute = map(int, period[0].split(':'))
+            end_hour, end_minute = map(int, period[1].split(':'))
+            start_time = start_hour * 60 + start_minute
+            end_time = end_hour * 60 + end_minute
+            if end_time <= start_time:  # Crosses midnight
+                end_time += total_minutes
+            availability_counts[start_time:end_time] += 1
+    
+    # Determine the maximum number of people available at any time
+    max_availability = np.max(availability_counts)
+
+    # Create the plot
+    fig, ax = plt.subplots(figsize=(10, 3))
+    ax.fill_between(range(total_minutes), 0, availability_counts[:total_minutes], color='blue', alpha=0.5)
+    ax.set_xlim([0, total_minutes])
+
+    # Set x-axis ticks and labels to display time in hours
+    ax.set_xticks([i * 60 for i in range(0, 25, 2)])  # Ticks every two hours
+    ax.set_xticklabels([f"{i}:00" for i in range(0, 25, 2)])  # Labels every two hours
+
+    # Set y-axis based on maximum availability
+    if max_availability < 10:
+        ax.set_yticks(range(int(max_availability) + 1))
+    elif max_availability < 20:
+        ax.set_yticks(range(0, int(max_availability) + 1, 2))
+    else:
+        ax.set_yticks(range(0, int(max_availability) + 1, 5))
+    
+    ax.set_xlabel("Time (UTC)")
+    ax.set_ylabel("Number of people available")
+    ax.set_title("Overlap in User Availability")
+    plt.grid(True)
+    return fig
+
+@bot.slash_command(guild_ids=[ALLIANCE_ID], name="poll-availability", description="Check user availability")
+async def poll_availability(ctx, day: discord.Option(str, "Enter the day", choices=["mon", "tue", "wed", "thu", "fri", "sat", "sun"])):
+    schedules = load_schedules()
+    day_availability = extract_day_availability(schedules, day.lower())
+    fig = visualize_availability(day_availability)
+    
+    # Save the plot to a BytesIO buffer
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png')
+    buf.seek(0)
+    
+    # Send the image in the channel
+    await ctx.respond(file=discord.File(buf, 'availability.png'))
+    plt.close(fig)  # Close the figure after saving to free memory
+
+@bot.slash_command(guild_ids=[ALLIANCE_ID], name="poll-availability-day", description="Check user availability for a specific day or today by default")
+async def poll_availability_day(ctx, date: discord.Option(str, "Enter the date (MM/DD or MM/DD/YYYY)", required=False)):
+    if not date:
+        date_obj = datetime.utcnow()
+    else:
+        try:
+            if len(date.split('/')) == 2:
+                date = f"{date}/{datetime.utcnow().year}"  # Assume current year if no year provided
+            date_obj = datetime.strptime(date, '%m/%d/%Y')  # Fixed missing parenthesis here
+        except ValueError:
+            await ctx.respond("Invalid date format. Please use MM/DD or MM/DD/YYYY.")
+            return
+
+    weekday = date_obj.strftime('%a').lower()[:3]  # Use first three letters for compatibility
+
+    schedules = load_schedules()
+    day_availability = extract_day_availability(schedules, weekday)
+    absences = load_absences()  # Corrected spelling of 'absences' here
+    adjust_availability_for_absences(day_availability, absences, date_obj)
+    fig = visualize_availability(day_availability)
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png')
+    buf.seek(0)
+    await ctx.respond(file=discord.File(buf, 'availability.png'))
+    plt.close(fig)
+
+@bot.slash_command(guild_ids=[ALLIANCE_ID], name="availability", description="Manage your availability")
+async def availability(ctx):
+    user_id = ctx.author.id # Get the user's ID
+
+    # Check if the user already has an entry in the DynamoDB table
+    response = table.get_item(Key={'user_id': user_id})
+    if 'Item' not in response:
+        # No record found, create one
+        new_uuid = str(uuid4())
+        table.put_item(Item={
+            'user_id': user_id,
+            'key': new_uuid
+        })
+        user_key = new_uuid
+    else:
+        # Record exists, fetch the UUID
+        user_key = response['Item']['key']
+
+    # Create a message embed with a button
+    embed = discord.Embed(
+        title="Manage Your Availability",
+        description="Hello! Please click the button below to go to your personal availability dashboard. "
+                    "At the link below you can add all the different times you're available. "
+                    "To add an absence, use the /absence command instead. The availability command should only be used to detail your general availability.",
+        color=discord.Color.blue()
+    )
+    button = discord.ui.Button(label="Go to Dashboard", url=f"https://www.whiteout.felserver.com/availability?key={user_key}")
+    view = discord.ui.View()
+    view.add_item(button)
+    
+    # Send a DM to the user with the embed and button
+    await ctx.author.send(embed=embed, view=view)
+    await ctx.respond("Check your DM for the availability dashboard link!", ephemeral=True)
+
 
 bot.run(os.getenv("BOT_TOKEN"))
