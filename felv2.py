@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 
 s3 = boto3.client('s3')
 bucket_name = 'scheduling-bucket-felserver'
+url = 'https://dev.d1a0gyqelbcgth.amplifyapp.com/'
 
 # Assuming the boto3 DynamoDB resource is already set up
 dynamodb = boto3.resource('dynamodb', region_name='us-east-2')
@@ -239,11 +240,11 @@ class FollowUpModal(Modal):
 
             # Construct the new nickname based on the initial choice and provided details
             if self.initial_choice == "FEL":
-                new_nickname = f"[FEL] {ingame_name}"
+                new_nickname = f"#454 [FEL] {ingame_name}"
             elif self.initial_choice == "FEL Academy":
-                new_nickname = f"[FeL] {ingame_name}"
+                new_nickname = f"#454 [FeL] {ingame_name}"
             elif self.initial_choice == "Another Alliance":
-                new_nickname = f"[{alliance}] {ingame_name}" if alliance else ingame_name
+                new_nickname = f"#454 [{alliance}] {ingame_name}" if alliance else ingame_name
             elif self.initial_choice == "Another State":
                 new_nickname = f"#{state} [{alliance}] {ingame_name}" if state and alliance else ingame_name
             else:
@@ -726,6 +727,7 @@ async def poll_availability_day(ctx, date: discord.Option(str, "Enter the date (
 @bot.slash_command(guild_ids=[ALLIANCE_ID], name="availability", description="Manage your availability")
 async def availability(ctx):
     user_id = ctx.author.id # Get the user's ID
+    username = ctx.author.display_name  # Gets the nickname if set, otherwise gets the username
 
     # Check if the user already has an entry in the DynamoDB table
     response = table.get_item(Key={'user_id': user_id})
@@ -734,7 +736,8 @@ async def availability(ctx):
         new_uuid = str(uuid4())
         table.put_item(Item={
             'user_id': user_id,
-            'key': new_uuid
+            'key': new_uuid,
+            'username': username
         })
         user_key = new_uuid
     else:
@@ -749,7 +752,7 @@ async def availability(ctx):
                     "To add an absence, use the /absence command instead. The availability command should only be used to detail your general availability.",
         color=discord.Color.blue()
     )
-    button = discord.ui.Button(label="Go to Dashboard", url=f"https://www.whiteout.felserver.com/availability?key={user_key}")
+    button = discord.ui.Button(label="Go to Dashboard", url=f"{url}availability?key={user_key}")
     view = discord.ui.View()
     view.add_item(button)
     
